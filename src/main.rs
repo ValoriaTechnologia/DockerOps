@@ -1,6 +1,13 @@
 mod models;
 mod database;
 mod commands;
+mod config;
+mod github;
+mod docker;
+mod compose_processor;
+mod volume_processor;
+mod secret_processor;
+mod stack_processor;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -74,17 +81,17 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Watch { url } => {
             let db = database::Database::new(&database_url).await?;
-            let commands = commands::Commands::new(db);
+            let commands = commands::Commands::new(db).await?;
             commands.watch(url).await?;
         }
         Commands::Reconcile { force } => {
             let db = database::Database::new(&database_url).await?;
-            let commands = commands::Commands::new(db);
+            let commands = commands::Commands::new(db).await?;
             commands.reconcile(*force).await?;
         }
         Commands::Stop => {
             let db = database::Database::new(&database_url).await?;
-            let commands = commands::Commands::new(db);
+            let commands = commands::Commands::new(db).await?;
             commands.stop().await?;
         }
         Commands::Version => {
@@ -93,7 +100,7 @@ async fn main() -> Result<()> {
         }
         Commands::DebugCache => {
             let db = database::Database::new(&database_url).await?;
-            let commands = commands::Commands::new(db);
+            let commands = commands::Commands::new(db).await?;
             commands.debug_cache().await?;
         }
     }
