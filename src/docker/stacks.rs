@@ -14,24 +14,13 @@ impl StackService {
         Self { client }
     }
 
-    /// Déploie un stack Docker Swarm
-    pub async fn deploy_stack(&self, stack_name: &str, compose_path: &Path, secrets_env_vars: &[(String, String)]) -> Result<()> {
+    /// Déploie un stack Docker Swarm. Les secrets sont gérés nativement par Swarm (external) et exposés via l'entrypoint généré.
+    pub async fn deploy_stack(&self, stack_name: &str, compose_path: &Path) -> Result<()> {
         println!("    Deploying stack '{}' with docker stack deploy", stack_name);
 
-        // Pour l'instant, on utilise encore la commande docker car bollard ne supporte pas directement
-        // docker stack deploy. On pourrait utiliser docker-compose ou implémenter manuellement.
-        // Pour cette version, on garde la commande shell mais on pourrait améliorer plus tard.
-        
-        let mut command = Command::new("docker");
-        command.args(&["stack", "deploy", "--detach=false", "-c", compose_path.to_str().unwrap(), stack_name]);
-        
-        // Add secrets as environment variables
-        for (env_name, env_value) in secrets_env_vars {
-            command.env(env_name, env_value);
-            println!("    Added environment variable: {} (secret)", env_name);
-        }
-        
-        let output = command.output()?;
+        let output = Command::new("docker")
+            .args(&["stack", "deploy", "--detach=false", "-c", compose_path.to_str().unwrap(), stack_name])
+            .output()?;
         
         if output.status.success() {
             println!("    Successfully deployed stack '{}'", stack_name);

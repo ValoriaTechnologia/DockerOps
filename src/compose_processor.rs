@@ -1,9 +1,10 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use serde_yaml::Value;
+use serde_yaml::{Value, Mapping};
 use crate::models::VolumeDefinition;
 use crate::models::NfsConfig;
+use crate::models::SecretDefinition;
 
 /// Processeur pour les fichiers docker-compose
 pub struct ComposeProcessor;
@@ -173,6 +174,99 @@ impl ComposeProcessor {
         }
 
         Ok(())
+    }
+
+    /// Injects Docker Swarm external secrets and entrypoint script into the compose content.
+    /// Adds top-level `secrets: <name>: external: true`, and for each service: `secrets`, volume for script, entrypoint.
+    pub fn process_secrets(
+        compose_content: &str,
+        secret_definitions: &[SecretDefinition],
+        entrypoint_script_volume: &str,
+    ) -> Result<String> {
+        if secret_definitions.is_empty() {
+            return Ok(compose_content.to_string());
+        }
+
+        let mut yaml_value: Value = serde_yaml::from_str(compose_content)?;
+
+        // Top-level secrets: each name -> external: true
+        let mut secrets_section = Mapping::new();
+        for def in secret_definitions {
+            let mut ext = Mapping::new();
+            ext.insert(Value::String("external".to_string()), Value::Bool(true));
+            secrets_section.insert(
+                Value::String(def.secret.clone()),
+                Value::Mapping(ext),
+            );
+        }
+        yaml_value["secrets"] = Value::Mapping(secrets_section);
+
+        // Per-service: secrets list, volume for script, entrypoint; preserve original command
+        let secret_names: Vec<Value> = secret_definitions
+            .iter()
+            .map(|d| Value::String(d.secret.clone()))
+            .collect();
+        let entrypoint_arr: Vec<Value> = vec![
+            Value::String("/bin/sh".to_string()),
+            Value::String("/run/entrypoint-secrets.sh".to_string()),
+        ];
+        let volume_entry = Value::String(entrypoint_script_volume.to_string());
+
+        if let Some(services) = yaml_value.get_mut("services") {
+            if let Some(services_mapping) = services.as_mapping_mut() {
+                for (_service_name, service) in services_mapping {
+                    if let Some(service_map) = service.as_mapping_mut() {
+                        // secrets: [names]
+                        service_map.insert(
+                            Value::String("secrets".to_string()),
+                            Value::Sequence(secret_names.clone()),
+                        );
+                        // volumes: append entrypoint script mount
+                        let volumes_key = Value::String("volumes".to_string());
+                        let existing = service_map.get_mut(&volumes_key);
+                        let mut vol_seq = match existing {
+                            Some(Value::Sequence(s)) => s.clone(),
+                            _ => vec![],
+                        };
+                        vol_seq.push(volume_entry.clone());
+                        service_map.insert(volumes_key, Value::Sequence(vol_seq));
+                        // entrypoint: our script (original entrypoint+command become command for exec "$@")
+                        let cmd_key = Value::String("command".to_string());
+                        let entry_key = Value::String("entrypoint".to_string());
+                        let mut new_cmd_parts: Vec<Value> = vec![];
+                        if let Some(old_entry) = service_map.get(&entry_key) {
+                            if let Some(seq) = old_entry.as_sequence() {
+                                for v in seq {
+                                    new_cmd_parts.push(v.clone());
+                                }
+                            } else if let Some(s) = old_entry.as_str() {
+                                new_cmd_parts.push(Value::String(s.to_string()));
+                            }
+                        }
+                        if let Some(old_cmd) = service_map.get(&cmd_key) {
+                            if let Some(seq) = old_cmd.as_sequence() {
+                                for v in seq {
+                                    new_cmd_parts.push(v.clone());
+                                }
+                            } else if let Some(s) = old_cmd.as_str() {
+                                new_cmd_parts.push(Value::String(s.to_string()));
+                            }
+                        }
+                        service_map.remove(&entry_key);
+                        service_map.insert(
+                            Value::String("entrypoint".to_string()),
+                            Value::Sequence(entrypoint_arr.clone()),
+                        );
+                        if !new_cmd_parts.is_empty() {
+                            service_map.insert(cmd_key, Value::Sequence(new_cmd_parts));
+                        }
+                    }
+                }
+            }
+        }
+
+        let modified_content = serde_yaml::to_string(&yaml_value)?;
+        Ok(modified_content)
     }
 }
 

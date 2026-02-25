@@ -3,7 +3,7 @@ use std::path::Path;
 use std::fs;
 use crate::models::{SecretDefinition, NfsConfig};
 
-/// Processeur pour gérer les secrets
+/// Processeur pour la configuration NFS et la déclaration des secrets (Docker Swarm).
 pub struct SecretProcessor;
 
 impl SecretProcessor {
@@ -20,39 +20,33 @@ impl SecretProcessor {
         Ok(config)
     }
 
-    /// Traite les secrets depuis un fichier secrets.yaml
-    pub fn process_secrets(stack_dir: &Path, repo_path: &str) -> Result<Vec<(String, String)>> {
-        // Read secrets.yaml file if it exists
+    /// Lit secrets.yaml (déclaration uniquement), génère entrypoint-secrets.sh, retourne les définitions.
+    /// Ne lit aucune valeur de secret (plus de NFS). Les secrets sont créés avec docker secret create.
+    pub fn process_secrets(stack_dir: &Path) -> Result<Option<Vec<SecretDefinition>>> {
         let secrets_file_path = stack_dir.join("secrets.yaml");
         if !secrets_file_path.exists() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
 
         let secrets_content = fs::read_to_string(&secrets_file_path)?;
-        let secrets_definitions: Vec<SecretDefinition> = serde_yaml::from_str(&secrets_content)?;
-
-        // Read NFS configuration to get the secrets path
-        let nfs_config = Self::load_nfs_config(repo_path)?;
-        let secrets_base_path = Path::new(&nfs_config.path).join("secret");
-
-        let mut env_vars = Vec::new();
-
-        // Process each secret definition
-        for secret_def in &secrets_definitions {
-            // Read secret value from NFS secrets directory
-            let secret_path = secrets_base_path.join(&secret_def.id);
-            if !secret_path.exists() {
-                return Err(anyhow::anyhow!("Secret file not found: {}", secret_path.display()));
-            }
-
-            let secret_value = fs::read_to_string(&secret_path)?;
-            let secret_value = secret_value.trim(); // Remove trailing whitespace/newlines
-
-            // Add to environment variables list
-            env_vars.push((secret_def.env.clone(), secret_value.to_string()));
+        let definitions: Vec<SecretDefinition> = serde_yaml::from_str(&secrets_content)?;
+        if definitions.is_empty() {
+            return Ok(None);
         }
 
-        Ok(env_vars)
+        // Generate entrypoint script: export ENV=$(cat /run/secrets/SECRET) for each, then exec "$@"
+        let mut script = String::from("#!/bin/sh\nset -e\n");
+        for def in &definitions {
+            script.push_str(&format!(
+                "export {}=$(cat /run/secrets/{} 2>/dev/null || true)\n",
+                def.env, def.secret
+            ));
+        }
+        script.push_str("exec \"$@\"\n");
+
+        let script_path = stack_dir.join("entrypoint-secrets.sh");
+        fs::write(&script_path, script)?;
+
+        Ok(Some(definitions))
     }
 }
-

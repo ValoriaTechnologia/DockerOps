@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::fs;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 
 use crate::database::Database;
 use crate::config::Config;
@@ -35,6 +37,16 @@ impl Commands {
             stack_service,
             config,
         })
+    }
+
+    /// Returns true if the repo was already in cache (caller may ignore).
+    pub async fn watch_or_skip_if_cached(&self, github_url: &str) -> Result<bool> {
+        if let Some(cached_repo) = self.db.get_repository_from_cache(github_url).await? {
+            println!("Repository '{}' is already being watched (last watch: {}), skipping.", github_url, cached_repo.last_watch);
+            return Ok(true);
+        }
+        self.watch(github_url).await?;
+        Ok(false)
     }
 
     pub async fn watch(&self, github_url: &str) -> Result<()> {
@@ -193,6 +205,28 @@ impl Commands {
         println!("DockerOps CLI v{}", env!("CARGO_PKG_VERSION"));
         println!("A Docker Swarm stack manager for GitHub repositories");
         println!("Repository: https://github.com/TomBedinoVT/DockerOps");
+    }
+
+    /// Daemon mode: optionally seed repos from DOCKEROPS_REPOS, then reconcile in a loop every interval_secs.
+    pub async fn run_daemon(&self, repo_urls: &[String], interval_secs: u64) -> Result<()> {
+        for url in repo_urls {
+            let url = url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.watch_or_skip_if_cached(url).await {
+                eprintln!("Warning: failed to watch '{}': {}", url, e);
+            }
+        }
+
+        let duration = Duration::from_secs(interval_secs);
+        loop {
+            sleep(duration).await;
+            println!("[daemon] Running reconcile (interval {}s)...", interval_secs);
+            if let Err(e) = self.reconcile(false).await {
+                eprintln!("[daemon] Reconcile error: {}", e);
+            }
+        }
     }
 
     pub async fn debug_cache(&self) -> Result<()> {

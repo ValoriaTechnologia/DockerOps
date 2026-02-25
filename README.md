@@ -17,12 +17,17 @@ curl -sSL https://raw.githubusercontent.com/TomBedinoVT/DockerOps/main/dockerops
 | `stop` | Arrêter toutes les stacks et nettoyer |
 | `version` | Afficher la version |
 | `debug-cache` | Afficher le cache des repositories |
+| `run` | Mode daemon (conteneur/Swarm) : synchronisation automatique à intervalle |
 
 Exécuter avec `sudo` (ex. `sudo dockerops watch "https://github.com/user/repo"`).
 
+## Docker et déploiement dans le Swarm
+
+Vous pouvez dockeriser DockerOps et le déployer comme un service dans le Swarm (mode type ArgoCD) : voir **[DOCUMENTATION.md#14-exécution-en-conteneur-et-dans-le-swarm](DOCUMENTATION.md#14-exécution-en-conteneur-et-dans-le-swarm)** (build image, variables d'environnement, fichier [deploy/dockerops-stack.yml](deploy/dockerops-stack.yml)).
+
 ## Documentation
 
-Documentation complète (installation, configuration, volumes, secrets, authentification GitHub, dépannage) : **[DOCUMENTATION.md](DOCUMENTATION.md)**.
+Documentation complète (installation, configuration, volumes, secrets, authentification GitHub, dépannage, exécution en conteneur) : **[DOCUMENTATION.md](DOCUMENTATION.md)**.
 
 ## Licence
 

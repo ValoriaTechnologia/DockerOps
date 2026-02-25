@@ -120,8 +120,11 @@ impl StackProcessor {
             }
         }
 
-        // Process secrets
-        let secrets_env_vars = SecretProcessor::process_secrets(&stack_dir, repo_path)?;
+        // Process secrets: read secrets.yaml (declaration only), generate entrypoint-secrets.sh, inject into compose
+        if let Some(secret_defs) = SecretProcessor::process_secrets(&stack_dir)? {
+            let entrypoint_volume = "./entrypoint-secrets.sh:/run/entrypoint-secrets.sh:ro";
+            compose_content = ComposeProcessor::process_secrets(&compose_content, &secret_defs, entrypoint_volume)?;
+        }
 
         // Write the modified compose content back to the file
         fs::write(compose_file_path, &compose_content)?;
@@ -151,7 +154,7 @@ impl StackProcessor {
                 self.db.update_stack_hash(&stack_def.name, repository_url, &compose_hash).await?;
 
                 // Deploy the updated stack
-                self.deploy_stack(&stack_def.name, compose_file_path, &secrets_env_vars).await?;
+                self.deploy_stack(&stack_def.name, compose_file_path).await?;
                 self.db.update_stack_status(&stack_def.name, repository_url, "deployed").await?;
             }
         } else {
@@ -165,7 +168,7 @@ impl StackProcessor {
             self.db.create_stack(&stack).await?;
 
             // Deploy the new stack
-            self.deploy_stack(&stack_def.name, compose_file_path, &secrets_env_vars).await?;
+            self.deploy_stack(&stack_def.name, compose_file_path).await?;
             self.db.update_stack_status(&stack_def.name, repository_url, "deployed").await?;
         }
 
@@ -176,12 +179,7 @@ impl StackProcessor {
     }
 
     /// Déploie un stack
-    async fn deploy_stack(
-        &self,
-        stack_name: &str,
-        compose_path: &Path,
-        secrets_env_vars: &[(String, String)],
-    ) -> Result<()> {
+    async fn deploy_stack(&self, stack_name: &str, compose_path: &Path) -> Result<()> {
         // Read compose file to extract images
         let compose_content = fs::read_to_string(compose_path)?;
 
@@ -194,8 +192,8 @@ impl StackProcessor {
             }
         }
 
-        // Deploy the stack using Docker client
-        self.stack_service.deploy_stack(stack_name, compose_path, secrets_env_vars).await?;
+        // Deploy the stack using Docker client (no secret values; secrets are Swarm-native)
+        self.stack_service.deploy_stack(stack_name, compose_path).await?;
 
         Ok(())
     }

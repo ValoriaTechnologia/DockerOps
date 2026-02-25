@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+.cursor/
+*.md
+!README.md
+.env
+*.db
+Dockerfile
+.dockerignore
+deploy/
+examples/
+*.plan.md

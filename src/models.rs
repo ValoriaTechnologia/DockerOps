@@ -51,9 +51,13 @@ pub struct NfsConfig {
     pub path: String,
 }
 
+/// Declaration of a Docker Swarm secret (name) and the env var to expose its file content as.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SecretDefinition {
-    pub id: String,
+    /// Docker Swarm secret name (created with docker secret create). Accepts "id" in YAML for backward compat.
+    #[serde(alias = "id")]
+    pub secret: String,
+    /// Environment variable name to set in the container from the secret file content.
     pub env: String,
 }
 

@@ -1,4 +1,4 @@
-# Documentation DockerOps
+git # Documentation DockerOps
 
 Guide utilisateur et référence technique pour DockerOps, outil CLI de gestion des stacks Docker Swarm depuis des répertoires GitHub.
 
@@ -17,6 +17,7 @@ Guide utilisateur et référence technique pour DockerOps, outil CLI de gestion 
 11. [Workflows et exemples](#11-workflows-et-exemples)
 12. [Dépannage](#12-dépannage)
 13. [Développement](#13-développement)
+14. [Exécution en conteneur et dans le Swarm](#14-exécution-en-conteneur-et-dans-le-swarm)
 
 ---
 
@@ -255,6 +256,7 @@ Si le repository est public, l'authentification n'est pas nécessaire.
 | `stop` | Arrêter toutes les stacks et nettoyer | - |
 | `version` | Afficher la version | - |
 | `debug-cache` | Afficher les infos de debug du cache | - |
+| `run` | Mode daemon : init. DOCKEROPS_REPOS puis boucle reconcile (conteneur/Swarm) | - |
 
 ### watch
 
@@ -296,6 +298,19 @@ sudo dockerops debug-cache
 ```
 
 Affiche les repositories en cache et leur dernier watch (utile pour le dépannage).
+
+### run (mode daemon)
+
+```bash
+sudo dockerops run
+```
+
+Lance DockerOps en mode daemon (comme ArgoCD) : initialise les repositories listés dans `DOCKEROPS_REPOS`, puis exécute `reconcile` en boucle à l’intervalle `DOCKEROPS_SYNC_INTERVAL` (en secondes). Utilisé notamment lorsque DockerOps est déployé dans un conteneur ou dans le Swarm.
+
+- **DOCKEROPS_REPOS** (optionnel) : URLs des repositories GitHub à surveiller, séparées par des virgules ou des points-virgules. Au démarrage, chaque URL est ajoutée au cache (équivalent d’un `watch`) ; si une URL est déjà en cache, elle est ignorée.
+- **DOCKEROPS_SYNC_INTERVAL** (optionnel) : intervalle en secondes entre deux reconciles (défaut : 300).
+
+Voir la section [Exécution en conteneur et dans le Swarm](#14-exécution-en-conteneur-et-dans-le-swarm).
 
 ---
 
@@ -409,44 +424,60 @@ repository/
 
 ## 8. Secrets
 
-Les secrets sont lus depuis le NFS et injectés comme variables d'environnement lors de `docker stack deploy`.
+DockerOps n'utilise que les **secrets natifs Docker Swarm**. Aucune valeur n'est lue depuis le disque (plus de NFS pour les secrets). Vous déclarez dans `secrets.yaml` quels secrets Swarm exposer en variables d'environnement ; DockerOps génère un script d'entrypoint qui fait `export VAR=$(cat /run/secrets/nom)` au démarrage du conteneur.
 
-### Chemin des secrets
+### Principe
 
-Les secrets sont stockés sous **`{nfs.path}/secret/{id}`**, où `nfs.path` est celui défini dans `nfs.yaml`. Exemple avec `path: "/mnt/nfs/dockerops"` :
-
-- `database_password` → `/mnt/nfs/dockerops/secret/database_password`
-- `api_key` → `/mnt/nfs/dockerops/secret/api_key`
-
-(Il ne s'agit pas de `/secrets/` au niveau système : tout est sous le chemin NFS.)
+- **secrets.yaml** : déclaration uniquement (pas de valeurs). Chaque entrée associe le **nom** d'un secret Docker Swarm à la **variable d'environnement** à remplir dans le conteneur.
+- Les secrets sont créés par l'administrateur avec `docker secret create <nom> -` (ou depuis un fichier) **avant** `watch` ou `reconcile`.
+- DockerOps lit `secrets.yaml`, génère un script **entrypoint-secrets.sh** dans le dossier du stack, et injecte dans le compose : section `secrets: <nom>: external: true`, montage du script, et entrypoint qui exporte les variables puis lance la commande du service. Le contenu des fichiers montés sous `/run/secrets/<nom>` est ainsi exposé automatiquement en variables d'environnement.
 
 ### Format secrets.yaml
 
 Fichier dans le dossier de chaque stack (à côté du docker-compose) :
 
 ```yaml
-- id: database_password
+- secret: db_password
   env: DB_PASSWORD
 
-- id: api_key
+- secret: api_key
   env: API_SECRET_KEY
 ```
 
-- **id** : identifiant du secret (nom du fichier sous `{nfs.path}/secret/`).
-- **env** : nom de la variable d'environnement injectée.
+- **secret** : nom du secret Docker Swarm (créé avec `docker secret create <nom> -`).
+- **env** : nom de la variable d'environnement à définir dans le conteneur (contenu du fichier `/run/secrets/<secret>`).
 
-### Création des secrets sur NFS
+Le champ **id** est accepté comme alias de **secret** pour la rétrocompatibilité.
+
+### Création des secrets (Swarm)
+
+Avant le premier déploiement, créez les secrets sur le Swarm :
 
 ```bash
-sudo mkdir -p /mnt/nfs/dockerops/secret
-echo "mon_mot_de_passe_secret" | sudo tee /mnt/nfs/dockerops/secret/database_password
-sudo chmod 600 /mnt/nfs/dockerops/secret/database_password
-sudo chown root:root /mnt/nfs/dockerops/secret/database_password
+echo -n "mon_mot_de_passe_secret" | docker secret create db_password -
+echo -n "ma_cle_api" | docker secret create api_key -
 ```
+
+Ou depuis un fichier :
+
+```bash
+docker secret create db_password ./db_password.txt
+```
+
+Vérification : `docker secret ls`
+
+### Comportement dans le conteneur
+
+DockerOps génère **entrypoint-secrets.sh** dans le dossier du stack. Ce script :
+
+1. Exporte chaque variable : `export DB_PASSWORD=$(cat /run/secrets/db_password 2>/dev/null || true)` (etc.)
+2. Lance la commande du service : `exec "$@"`
+
+Le compose modifié contient un volume montant ce script et un entrypoint qui l'exécute. Votre application reçoit donc les variables d'environnement sans lire les fichiers sous `/run/secrets/` elle-même.
 
 ### Utilisation dans docker-compose
 
-Les variables sont injectées automatiquement ; les référencer dans `environment` sans valeur :
+Vous pouvez référencer les variables dans `environment` (sans valeur) ; elles seront définies par l'entrypoint :
 
 ```yaml
 services:
@@ -457,30 +488,14 @@ services:
       - API_SECRET_KEY
 ```
 
-Le fichier docker-compose reste inchangé ; DockerOps passe les paires env/valeur au processus `docker stack deploy`. Si un fichier secret est manquant, le déploiement échoue.
+La section `secrets` (external) et l'entrypoint sont **injectés automatiquement** par DockerOps à partir de `secrets.yaml`.
 
-### Bonnes pratiques sécurité
+### Bonnes pratiques
 
-- Permissions restrictives (600), propriétaire root.
-- Ne jamais stocker les secrets dans le repository GitHub.
-- Rotation régulière, accès limité au répertoire NFS des secrets.
-- Les valeurs ne sont pas loggées.
-
-Script de création sécurisée (exemple) :
-
-```bash
-SECRET_DIR="/mnt/nfs/dockerops/secret"
-create_secret() {
-    local id=$1
-    local file="$SECRET_DIR/$id"
-    read -s -p "Enter secret for $id: " secret
-    echo
-    echo -n "$secret" | sudo tee "$file" > /dev/null
-    sudo chmod 600 "$file"
-    sudo chown root:root "$file"
-}
-create_secret "database_password"
-```
+- Ne jamais committer de valeurs de secrets dans le repository.
+- Créer les secrets sur le Swarm avant d'exécuter `watch` ou `reconcile`.
+- Rotation : créer un nouveau secret (ex. `db_password_v2`), mettre à jour `secrets.yaml` et le compose si besoin, redéployer.
+- En cas d'erreur de déploiement liée aux secrets : vérifier que les secrets existent (`docker secret ls`) et que les noms dans `secrets.yaml` correspondent exactement.
 
 ---
 
@@ -577,11 +592,11 @@ my-dockerops-repo/
 
 ### Exemple : stack avec secrets
 
-Structure : `stacks.yaml`, `nfs.yaml`, `api-stack/docker-compose.yml`, `api-stack/secrets.yaml`. Secrets sous `/mnt/nfs/dockerops/secret/` (ex. `db_password`, `jwt_secret`). Variables d'environnement déclarées sans valeur dans le compose.
+Structure : `stacks.yaml`, `api-stack/docker-compose.yml`, `api-stack/secrets.yaml`. Créer les secrets sur le Swarm avant déploiement : `echo -n "valeur" | docker secret create db_password -` (et idem pour `jwt_secret`). Dans `secrets.yaml` : `- secret: db_password` / `env: DB_PASSWORD` et `- secret: jwt_secret` / `env: JWT_SECRET`. DockerOps génère `entrypoint-secrets.sh` et injecte la section `secrets` (external) et l'entrypoint ; les variables sont disponibles dans le conteneur.
 
 ### Exemple : multi-stacks avec volumes et secrets
 
-Plusieurs stacks (ex. web-stack, api-stack), `volumes.yaml` et `nfs.yaml` communs, `secrets.yaml` par stack si besoin. Même principe : volumes et secrets définis une fois, référencés dans chaque compose.
+Plusieurs stacks (ex. web-stack, api-stack), `volumes.yaml` et `nfs.yaml` communs si besoin de volumes, `secrets.yaml` par stack. Secrets créés avec `docker secret create` ; déclaration dans chaque `secrets.yaml` (secret + env). Même principe : volumes et secrets déclarés, DockerOps injecte NFS pour les bindings et entrypoint + secrets externes pour les secrets.
 
 ### Workflows avancés
 
@@ -602,7 +617,8 @@ Plusieurs stacks (ex. web-stack, api-stack), `volumes.yaml` et `nfs.yaml` commun
 - **"DockerOps must be run with root privileges"** : exécuter avec `sudo dockerops <command>`.
 - **Stack non déployée** : vérifier présence du dossier et du docker-compose, lancer `reconcile`, puis `docker stack ls` et `docker stack ps <stack-name>`.
 - **Images non pullées** : vérifier `DOCKEROPS_IMAGE_PULL_POLICY`, essayer `always` et `reconcile --force`.
-- **Problèmes NFS** : `mount | grep nfs`, `ls -la /mnt/nfs/dockerops`, cohérence avec `nfs.yaml`.
+- **Erreur liée aux secrets** : vérifier que les secrets existent dans le Swarm (`docker secret ls`) et que les noms dans `secrets.yaml` correspondent exactement à ceux créés.
+- **Problèmes NFS** (volumes uniquement) : `mount | grep nfs`, `ls -la /mnt/nfs/dockerops`, cohérence avec `nfs.yaml`.
 
 ### Commandes de debug
 
@@ -614,6 +630,7 @@ docker stack services <stack-name>
 docker service ls
 docker service ps <service-name>
 docker service logs <service-name>
+docker secret ls   # vérifier les secrets Swarm
 ```
 
 Logs et diagnostics : `docker stack ps <stack-name> --no-trunc`, `docker service inspect <service-name>`, `docker images`, et si besoin `sqlite3 ~/.dockerops/dockerops.db "SELECT * FROM stacks;"` (et `images`).
@@ -638,6 +655,66 @@ sudo cargo run -- watch "https://github.com/example/repo"
 ```
 
 Process de release et publication des binaires : voir [RELEASE.md](RELEASE.md).
+
+---
+
+## 14. Exécution en conteneur et dans le Swarm
+
+DockerOps peut être dockerisé et déployé comme un service dans le Swarm, en mode autonome (type ArgoCD) : le conteneur exécute la commande `run`, initialise les repositories depuis `DOCKEROPS_REPOS` puis enchaîne des `reconcile` à intervalle régulier.
+
+### Build de l’image
+
+À la racine du repository :
+
+```bash
+docker build -t dockerops:latest .
+```
+
+L’image contient le binaire DockerOps et le CLI Docker (pour `docker stack deploy`). Le point d’entrée par défaut est `dockerops run`.
+
+### Variables d’environnement en conteneur
+
+- **DOCKEROPS_DB_PATH** : chemin de la base SQLite (défaut dans l’image : `/data/dockerops.db`). À placer sur un volume monté pour persister.
+- **DOCKEROPS_REPOS** : liste d’URLs GitHub à surveiller, séparées par des virgules ou des points-virgules. Au démarrage, chaque URL est ajoutée au cache (watch) si elle n’y est pas déjà.
+- **DOCKEROPS_SYNC_INTERVAL** : intervalle en secondes entre deux reconciles (défaut : 300).
+- **GITHUB_TOKEN** : token GitHub pour les repositories privés. En Swarm, peut être fourni via un secret monté en fichier (voir ci-dessous).
+
+### Exécution locale en conteneur
+
+Montage du socket Docker et d’un volume pour la base :
+
+```bash
+docker run -d \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v dockerops-data:/data \
+  -e DOCKEROPS_REPOS="https://github.com/org/repo1" \
+  -e DOCKEROPS_SYNC_INTERVAL=300 \
+  -e GITHUB_TOKEN="ghp_xxx" \
+  --name dockerops \
+  dockerops:latest
+```
+
+### Déploiement dans le Swarm
+
+Un exemple de stack est fourni dans [deploy/dockerops-stack.yml](deploy/dockerops-stack.yml).
+
+1. **Créer le secret Swarm pour le token GitHub :**
+   ```bash
+   echo -n "ghp_votre_token" | docker secret create github_token -
+   ```
+
+2. **Adapter le fichier** `deploy/dockerops-stack.yml` : mettre à jour `DOCKEROPS_REPOS` avec vos URLs, et éventuellement l’image (registry si besoin).
+
+3. **Déployer le stack :**
+   ```bash
+   docker stack deploy -c deploy/dockerops-stack.yml dockerops
+   ```
+
+Le service DockerOps doit s’exécuter sur un nœud **manager** (contrainte `node.role == manager` dans l’exemple) pour accéder au socket Docker et déployer les stacks sur le même Swarm. L’image inclut un entrypoint qui exporte `GITHUB_TOKEN` depuis `/run/secrets/github_token` si ce fichier est présent (secret Swarm monté).
+
+### Persistance
+
+Le volume `dockerops-data` (ou le chemin défini par `DOCKEROPS_DB_PATH`) doit être persistant pour conserver le cache des repositories et l’état des stacks. Sans volume, les données sont perdues au redémarrage du conteneur.
 
 ---
 

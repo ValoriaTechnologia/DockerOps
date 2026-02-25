@@ -39,6 +39,8 @@ enum Commands {
     Version,
     /// Debug repository cache
     DebugCache,
+    /// Run as daemon: seed repos from DOCKEROPS_REPOS, then reconcile in a loop (DOCKEROPS_SYNC_INTERVAL seconds)
+    Run,
 }
 
 #[tokio::main]
@@ -102,6 +104,21 @@ async fn main() -> Result<()> {
             let db = database::Database::new(&database_url).await?;
             let commands = commands::Commands::new(db).await?;
             commands.debug_cache().await?;
+        }
+        Commands::Run => {
+            let repo_urls: Vec<String> = std::env::var("DOCKEROPS_REPOS")
+                .unwrap_or_default()
+                .split(|c| c == ',' || c == ';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let interval_secs: u64 = std::env::var("DOCKEROPS_SYNC_INTERVAL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300);
+            let db = database::Database::new(&database_url).await?;
+            let commands = commands::Commands::new(db).await?;
+            commands.run_daemon(&repo_urls, interval_secs).await?;
         }
     }
 
